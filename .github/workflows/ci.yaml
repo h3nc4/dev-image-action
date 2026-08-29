@@ -1,0 +1,87 @@
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026 Henrique Almeida <me@h3nc4.com>
+
+name: CI
+
+on:
+  push:
+    branches:
+      - "main"
+  pull_request:
+    branches:
+      - "main"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run actions/checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Lint shell scripts
+        run: shellcheck -o all resolve.sh tests/*.sh
+
+  test:
+    name: Test resolve.sh
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run actions/checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Exercise both decisions and the exported invocation
+        run: ./tests/resolve.test.sh
+
+  published:
+    name: Use the action, published image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run actions/checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Resolve, with nothing to compare against
+        id: dev
+        uses: ./
+        with:
+          published-repo: busybox
+          version-file: tests/fixture/VERSION
+          dockerfile: tests/fixture/Dockerfile
+          image-inputs: tests/fixture/Dockerfile
+          base-sha: "0000000000000000000000000000000000000000"
+          docker-args: -e FIXTURE=reached
+      - name: The output and the environment agree
+        run: |
+          test "${{ steps.dev.outputs.image }}" = "busybox:musl"
+          test "${DEV_IMAGE}" = "busybox:musl"
+      - name: The invocation runs, mounts the checkout and takes extra flags
+        run: |
+          test "$($DEV_RUN -c 'cat /workspace/tests/fixture/VERSION')" = "musl"
+          test "$($DEV_RUN -c 'printf %s "${FIXTURE}"')" = "reached"
+
+  candidate:
+    name: Use the action, built candidate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run actions/checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Resolve, with a base that cannot be reached
+        id: dev
+        uses: ./
+        with:
+          published-repo: busybox
+          version-file: tests/fixture/VERSION
+          dockerfile: tests/fixture/Dockerfile
+          image-inputs: tests/fixture/Dockerfile
+          base-sha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+          workdir: /src
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: It built rather than pulled
+        run: |
+          test "${{ steps.dev.outputs.image }}" = "busybox:candidate"
+          docker image inspect busybox:candidate >/dev/null
+      - name: The built image runs at the configured workdir
+        run: test "$($DEV_RUN -c 'cat /src/tests/fixture/VERSION')" = "musl"
