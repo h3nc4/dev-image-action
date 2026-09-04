@@ -13,7 +13,6 @@
 
 set -eu
 
-: "${PUBLISHED_REPO:?PUBLISHED_REPO is not set}"
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is not set. This runs under GitHub Actions.}"
 : "${GITHUB_ENV:?GITHUB_ENV is not set. This runs under GitHub Actions.}"
 
@@ -21,8 +20,42 @@ cd "${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is not set. This runs under GitHub Acti
 
 workdir="${WORKDIR:-/workspace}"
 dockerfile="${DOCKERFILE:-docker/dev.Dockerfile}"
-version_file="${VERSION_FILE:-.github/VERSION}"
+devcontainer_file="${DEVCONTAINER_FILE:-.devcontainer.json}"
 image_inputs="${IMAGE_INPUTS:-docker/dev.Dockerfile scripts/entrypoint.sh scripts/switch-user.sh}"
+
+published="${IMAGE:-}"
+origin="the image input"
+if [ -z "${published}" ]; then
+  origin="the image key in ${devcontainer_file}"
+  if [ ! -f "${devcontainer_file}" ]; then
+    echo "${devcontainer_file} is not there. Point devcontainer-file at the dev container" \
+      "definition, or name the image outright with the image input." >&2
+    exit 1
+  fi
+  # The first "image" key, which in a dev container definition is the top-level one. A key
+  # behind a // comment does not open its line, so a commented-out image is passed over.
+  published="$(
+    sed -n 's/^[[:space:]]*"image"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+      "${devcontainer_file}" | head -n 1
+  )"
+  if [ -z "${published}" ]; then
+    echo "${devcontainer_file} has no image key, so it either builds its own image or names" \
+      "one somewhere this cannot read. Name it with the image input." >&2
+    exit 1
+  fi
+fi
+
+# A reference with no tag pulls whatever latest happens to be, which is the opposite of a pin.
+# The colon has to sit in the last path element, since an earlier one is a registry's port.
+case "${published##*/}" in
+  *:?*) ;;
+  *)
+    echo "${origin} is '${published}', which carries no tag." \
+      "Pin the version the job should run, such as '${published}:1'." >&2
+    exit 1
+    ;;
+esac
+published_repo="${published%:*}"
 
 # A first push to a branch reports an all-zero base and has nothing to compare against, so
 # treat the image as untouched. A base that no longer resolves, after a force-push, is the
@@ -44,20 +77,19 @@ esac
 
 image=""
 if [ -z "${changed}" ]; then
-  published="${PUBLISHED_REPO}:$(cat "${version_file}")"
   if docker pull -q "${published}" >/dev/null 2>&1; then
     image="${published}"
-    echo "Image inputs untouched; using ${image}" >&2
+    echo "Image inputs untouched, so using ${image}" >&2
   else
     changed="${published} could not be pulled"
     echo "::warning::${changed}, so it is being built from this checkout instead." \
-      "Otherwise check the tag in ${version_file}, and whether this job logs in to the registry."
+      "Otherwise check ${origin}, and whether this job logs in to the registry."
   fi
 fi
 
 if [ -z "${image}" ]; then
   # No namespace, so nothing tries to pull this from a registry.
-  image="${PUBLISHED_REPO##*/}:candidate"
+  image="${published_repo##*/}:candidate"
   echo "Building ${image} from this checkout:" >&2
   echo "${changed}" | sed 's/^/  /' >&2
   set -- build

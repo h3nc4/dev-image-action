@@ -19,6 +19,10 @@ repo="${work}/repo"
 
 failures=0
 
+pin() { # $1=file, $2=image reference: writes a dev container definition pinning it
+  printf '{\n  "name": "fixture",\n  "image": "%s"\n}\n' "$2" >"$1"
+}
+
 check() { # $1=label $2=expected, rest: command producing the actual value
   label="$1"
   expected="$2"
@@ -36,13 +40,13 @@ check() { # $1=label $2=expected, rest: command producing the actual value
   failures=$((failures + 1))
 }
 
-mkdir -p "${repo}/docker" "${repo}/scripts" "${repo}/.github"
+mkdir -p "${repo}/docker" "${repo}/scripts"
 cd "${repo}"
 git init -q -b main
 git config user.email ci@example.com
 git config user.name CI
 git config commit.gpgsign false
-printf '%s\n' "${tag}" >.github/VERSION
+pin .devcontainer.json "${published}:${tag}"
 printf 'FROM %s:%s\n' "${published}" "${tag}" >docker/dev.Dockerfile
 printf '#!/bin/sh\n' >scripts/entrypoint.sh
 printf '#!/bin/sh\n' >scripts/switch-user.sh
@@ -61,7 +65,6 @@ resolved() { # $1=BASE_SHA, rest: VAR=value overrides
     GITHUB_OUTPUT="${work}/out" \
     GITHUB_ENV="${work}/env" \
     RUNNER_TEMP="${work}" \
-    PUBLISHED_REPO="${published}" \
     BASE_SHA="${base_sha}" \
     "$@" \
     sh "${resolve}" >"${work}/log" 2>&1 || {
@@ -81,25 +84,57 @@ chosen_entrypoint() { # reads it back off the script the last resolve generated
   sed -n 's/.*--entrypoint \([^ ]*\).*/\1/p' "${script}"
 }
 
-with_version() { # $1=contents of the version file for this one call
-  printf '%s\n' "$1" >.github/VERSION
-  resolved "${base}"
-  printf '%s\n' "${tag}" >.github/VERSION
+refused() { # $1=label $2=fragment the message has to carry, rest: VAR=value overrides
+  label="$1"
+  needle="$2"
+  shift 2
+  status=0
+  # Refusing is the assertion here, so set -e is meant to stand aside for it.
+  # shellcheck disable=SC2310
+  resolved "${base}" "$@" >/dev/null 2>&1 || status=$?
+  if [ "${status}" -eq 0 ]; then
+    printf '  FAIL  %s\n          it resolved an image instead of refusing\n' "${label}"
+  elif grep -qF "${needle}" "${work}/log"; then
+    printf '  ok    %s\n' "${label}"
+    return 0
+  else
+    printf '  FAIL  %s\n          no mention of "%s" in:\n' "${label}" "${needle}"
+    sed 's/^/          /' "${work}/log"
+  fi
+  failures=$((failures + 1))
 }
 
 echo "Deciding which image to use"
-check "untouched inputs use the published image" "${published}:${tag}" \
+check "untouched inputs use the pinned image" "${published}:${tag}" \
   resolved "${base}"
 check "an all-zero base is not a change" "${published}:${tag}" \
   resolved 0000000000000000000000000000000000000000
 check "an absent base is not a change" "${published}:${tag}" \
   resolved ""
-check "the version file supplies the tag" "${published}:glibc" \
-  with_version glibc
-printf '%s\n' "${tag}" >build-id
-check "an alternative version file is read" "${published}:${tag}" \
-  resolved "${base}" VERSION_FILE=build-id
-rm -f build-id
+
+echo "Reading the pin"
+pin alt.json "${published}:glibc"
+check "an alternative dev container file is read" "${published}:glibc" \
+  resolved "${base}" DEVCONTAINER_FILE=alt.json
+check "the image input overrides the file" "${published}:glibc" \
+  resolved "${base}" IMAGE="${published}:glibc"
+{
+  printf '{\n'
+  printf '  // "image": "%s:uclibc",\n' "${published}"
+  printf '  "image": "%s:glibc"\n}\n' "${published}"
+} >commented.json
+check "a commented-out image is passed over" "${published}:glibc" \
+  resolved "${base}" DEVCONTAINER_FILE=commented.json
+printf '{\n  "name": "builds its own"\n}\n' >keyless.json
+refused "a file with no image key is refused" "has no image key" \
+  DEVCONTAINER_FILE=keyless.json
+refused "a file that is not there is refused" "is not there" \
+  DEVCONTAINER_FILE=absent.json
+refused "a reference with no tag is refused" "carries no tag" \
+  IMAGE="${published}"
+refused "a registry port is no substitute for a tag" "carries no tag" \
+  IMAGE="localhost:5000/${published}"
+rm -f alt.json commented.json keyless.json
 
 echo "Rebuilding when the inputs move"
 printf 'FROM %s:%s\nRUN true\n' "${published}" "${tag}" >docker/dev.Dockerfile
@@ -118,7 +153,7 @@ check "any listed input counts, not just the dockerfile" "${published}:candidate
 echo "Bootstrapping, and recovering from a tag that is not there"
 head_sha="$(git rev-parse HEAD)"
 check "an unpullable published image builds instead" "nonexistent-dev-xyz:candidate" \
-  resolved "${head_sha}" PUBLISHED_REPO=h3nc4/nonexistent-dev-xyz
+  resolved "${head_sha}" IMAGE=h3nc4/nonexistent-dev-xyz:1
 
 echo "The exported invocation"
 image="$(resolved "${base}")"

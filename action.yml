@@ -3,8 +3,8 @@
 
 name: Resolve dev container image
 description: >
-  Names the dev container image a CI job should run in, builds it from the checkout when the
-  change touches the image inputs, and exports the docker invocation the job's steps use.
+  Runs a CI job in the image the project's dev container pins, builds that image from the
+  checkout when the change touches its inputs, and exports the invocation the job's steps use.
 author: Henrique Almeida
 
 branding:
@@ -12,13 +12,19 @@ branding:
   color: blue
 
 inputs:
-  published-repo:
-    description: Repository of the published image, without a tag.
-    required: true
-  version-file:
-    description: File holding the tag of the published image, read when no rebuild is needed.
+  devcontainer-file:
+    description: >
+      Dev container definition the published image is read from, tag and all. The file the
+      editor already obeys is the only source of truth for the image, so a release bumping the
+      pin moves CI with it and no second copy of the name or the version can fall behind.
     required: false
-    default: .github/VERSION
+    default: .devcontainer.json
+  image:
+    description: >
+      Published image, with its tag, overriding the dev container file. For a job whose image
+      is not the one the dev container pins, and for a project that has no such file.
+    required: false
+    default: ""
   dockerfile:
     description: Dockerfile to build when the image inputs changed.
     required: false
@@ -75,8 +81,8 @@ runs:
       shell: sh
       run: "${{ github.action_path }}/resolve.sh"
       env:
-        PUBLISHED_REPO: ${{ inputs.published-repo }}
-        VERSION_FILE: ${{ inputs.version-file }}
+        DEVCONTAINER_FILE: ${{ inputs.devcontainer-file }}
+        IMAGE: ${{ inputs.image }}
         DOCKERFILE: ${{ inputs.dockerfile }}
         IMAGE_INPUTS: ${{ inputs.image-inputs }}
         WORKDIR: ${{ inputs.workdir }}

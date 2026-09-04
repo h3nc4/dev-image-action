@@ -1,1 +1,6 @@
-musl
+{
+  // A stand-in for a project's own .devcontainer.json. The smoke jobs point the action at
+  // this instead of the one at the root, which pins no image because this repo is not one.
+  "name": "dev-image-action fixture",
+  "image": "busybox:musl"
+}

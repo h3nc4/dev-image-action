@@ -46,8 +46,7 @@ jobs:
         id: dev
         uses: ./
         with:
-          published-repo: busybox
-          version-file: tests/fixture/VERSION
+          devcontainer-file: tests/fixture/devcontainer.json
           dockerfile: tests/fixture/Dockerfile
           image-inputs: tests/fixture/Dockerfile
           base-sha: "0000000000000000000000000000000000000000"
@@ -58,7 +57,7 @@ jobs:
           test "${DEV_IMAGE}" = "busybox:musl"
       - name: The invocation runs, mounts the checkout and takes extra flags
         run: |
-          test "$($DEV_RUN -c 'cat /workspace/tests/fixture/VERSION')" = "musl"
+          test "$($DEV_RUN -c 'grep -c busybox:musl /workspace/tests/fixture/devcontainer.json')" = "1"
           test "$($DEV_RUN -c 'printf %s "${FIXTURE}"')" = "reached"
 
   candidate:
@@ -71,8 +70,7 @@ jobs:
         id: dev
         uses: ./
         with:
-          published-repo: busybox
-          version-file: tests/fixture/VERSION
+          devcontainer-file: tests/fixture/devcontainer.json
           dockerfile: tests/fixture/Dockerfile
           image-inputs: tests/fixture/Dockerfile
           base-sha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
@@ -84,4 +82,4 @@ jobs:
           test "${{ steps.dev.outputs.image }}" = "busybox:candidate"
           docker image inspect busybox:candidate >/dev/null
       - name: The built image runs at the configured workdir
-        run: test "$($DEV_RUN -c 'cat /src/tests/fixture/VERSION')" = "musl"
+        run: test "$($DEV_RUN -c 'grep -c busybox:musl /src/tests/fixture/devcontainer.json')" = "1"

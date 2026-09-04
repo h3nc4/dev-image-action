@@ -8,13 +8,17 @@ A project with a dev container usually pins it, so CI pulls a published tag. Tha
 - uses: actions/checkout@v7
   with:
     fetch-depth: 0
-- uses: h3nc4/dev-image-action@v1
-  with:
-    published-repo: you/yourproject-dev
+- uses: h3nc4/dev-image-action@v2
 - run: $DEV_RUN -c 'gradle --no-daemon test'
 ```
 
-That is the whole integration. The step exports `DEV_RUN`, a small script that runs one command inside the resolved image with the checkout mounted, so a job step stays one line whichever image it got. The command goes through bash when the image has it and through `/bin/sh` otherwise.
+That is the whole integration, and it takes no inputs: the image comes from the `image` key of `.devcontainer.json`, tag and all. The step exports `DEV_RUN`, a small script that runs one command inside the resolved image with the checkout mounted, so a job step stays one line whichever image it got. The command goes through bash when the image has it and through `/bin/sh` otherwise.
+
+## One source of truth for the image
+
+The dev container file already decides which image an editor opens the project in, and it is the file a release has to bump for the next person who reopens the project. Reading it here is what keeps CI on that same image. The alternative, a repository variable for the name beside a version file for the tag, is three copies of one fact, and the day one of them lags is the day CI stops testing what developers run.
+
+So a release workflow bumps `.devcontainer.json` and nothing else, and every job follows. A job that needs some other image says so with the `image` input, which also covers a project that has no dev container file at all.
 
 ## Why not a container job
 
@@ -24,8 +28,8 @@ That is the whole integration. The step exports `DEV_RUN`, a small script that r
 
 | Input | Default | Meaning |
 | --- | --- | --- |
-| `published-repo` | required | Repository of the published image, without a tag. |
-| `version-file` | `.github/VERSION` | File holding the tag to pull when no rebuild is needed. |
+| `devcontainer-file` | `.devcontainer.json` | Dev container definition the published image is read from, tag and all. |
+| `image` | empty | Published image, with its tag, overriding the dev container file. |
 | `dockerfile` | `docker/dev.Dockerfile` | Dockerfile to build when the image inputs moved. |
 | `image-inputs` | `docker/dev.Dockerfile scripts/entrypoint.sh scripts/switch-user.sh` | Space-separated paths that decide a rebuild. List the Dockerfile and everything it copies. |
 | `workdir` | `/workspace` | Where the checkout is mounted inside the container. |
@@ -40,6 +44,8 @@ That is the whole integration. The step exports `DEV_RUN`, a small script that r
 
 ## Requirements
 
+**Pin the image with a tag.** The `image` key has to read `you/yourproject-dev:7`, not `you/yourproject-dev`. A reference with no tag pulls whichever image `latest` points at that morning, which is the opposite of a pin, so the action refuses one rather than resolving something it cannot name. The tag belongs to the last path element, since a colon before that one is a registry's port.
+
 **Check out with `fetch-depth: 0`.** The decision is a diff against the base commit, and a shallow checkout cannot reach it. The action then falls back to the published image, so a shallow clone doesn't fail. It just stops testing candidates.
 
 **Log in before the pull.** A job that skips the rebuild pulls the published image instead, and pulling anonymously counts against a rate limit shared with every runner on the same address. Private repositories refuse it outright. Put `docker/login-action` before this step. The pull happens inside it, and a pull that fails does not stop the job: the image gets built from the checkout instead, under a warning that says so. That is what makes a first publish work, and it means a missing login costs you a rebuild rather than a red run.
@@ -47,9 +53,8 @@ That is the whole integration. The step exports `DEV_RUN`, a small script that r
 **Pass what the action cannot assume.** Where your build tool keeps its cache, and any device the suite needs, belong in `docker-args`:
 
 ```yaml
-- uses: h3nc4/dev-image-action@v1
+- uses: h3nc4/dev-image-action@v2
   with:
-    published-repo: you/yourproject-dev
     docker-args: -e GRADLE_USER_HOME=/workspace/.gradle-ci --device /dev/kvm
 ```
 
@@ -59,7 +64,7 @@ Later flags override earlier ones, so `docker-args` can replace a default such a
 
 The action diffs `base-sha` against `HEAD`, limited to `image-inputs`.
 
-* Nothing listed changed, so the job runs in `published-repo:<version-file>`.
+* Nothing listed changed, so the job runs in the image the dev container file pins.
 * A listed path moved, so the job runs in a locally built `<image name>:candidate`. That name has no namespace, which keeps anything from trying to pull it.
 * The base is absent or all zeroes, which is what a branch's first push reports. There is nothing to compare, so the published image stands.
 * The base no longer resolves, which is what a force-push leaves behind. Nothing can be ruled out, so it builds.
@@ -71,7 +76,7 @@ Building the candidate once per job is the price of every job resolving its own 
 
 ## Tests
 
-`./tests/resolve.test.sh` builds a throwaway repository and walks every decision above. It then proves the exported invocation runs a command in the image, with the checkout mounted and any extra flags forwarded. It needs docker and git, and it runs anywhere rather than only on a runner. CI runs it alongside two jobs that use the action for real, one on each side of the decision.
+`./tests/resolve.test.sh` builds a throwaway repository and walks every decision above. It also covers what the action refuses, which is a dev container file that is absent, one without an image key, and a reference without a tag. It then proves the exported invocation runs a command in the image, with the checkout mounted and any extra flags forwarded. It needs docker and git, and it runs anywhere rather than only on a runner. CI runs it alongside two jobs that use the action for real, one on each side of the decision.
 
 ## License
 
