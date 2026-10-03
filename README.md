@@ -1,6 +1,6 @@
 # dev-image-action
 
-Runs your CI in your own dev container image, and rebuilds that image from the branch whenever the change touches it.
+Runs a project's CI in its own dev container image, and rebuilds that image from the branch whenever the change touches it.
 
 A project with a dev container usually pins it, so CI pulls a published tag. That leaves a gap: a pull request editing the Dockerfile proves only that the image still builds, never that the suite passes inside it. This action makes the suite run in the edited image. It compares the change against its base, and when a path that shapes the image has moved, it builds the image from the checkout and points the job at that instead of the tag it is about to replace. Nothing is pushed.
 
@@ -16,13 +16,13 @@ That is the whole integration, and it takes no inputs: the image comes from the 
 
 ## One source of truth for the image
 
-The dev container file already decides which image an editor opens the project in, and it is the file a release has to bump for the next person who reopens the project. Reading it here is what keeps CI on that same image. The alternative, a repository variable for the name beside a version file for the tag, is three copies of one fact, and the day one of them lags is the day CI stops testing what developers run.
+The dev container file already decides which image an editor opens the project in, and it is the file a release has to bump for the next person who reopens the project. Reading it here is what keeps CI on that same image. The alternative keeps a repository variable for the name and a version file for the tag beside the dev container file, which makes three copies of one fact, and the day one of them lags is the day CI stops testing what developers run.
 
 So a release workflow bumps `.devcontainer.json` and nothing else, and every job follows. A job that needs some other image says so with the `image` input, which also covers a project that has no dev container file at all.
 
 ## Why not a container job
 
-`container:` pulls the image before the first step runs, so a job cannot build the image it needs, and it cannot pass flags such as `--device /dev/kvm` for an emulator. The image also lives only in this runner's Docker daemon, so it cannot cross to another job. Every job resolves it for itself, so this is an action rather than a reusable workflow.
+`container:` pulls the image before the first step runs, so a job cannot build the image it needs. The image also lives only in this runner's Docker daemon, so it cannot cross to another job. Every job resolves it for itself, so this is an action rather than a reusable workflow.
 
 ## Inputs
 
@@ -46,11 +46,11 @@ So a release workflow bumps `.devcontainer.json` and nothing else, and every job
 
 **Pin the image with a tag.** The `image` key has to read `you/yourproject-dev:7`, not `you/yourproject-dev`. A reference with no tag pulls whichever image `latest` points at that morning, which is the opposite of a pin, so the action refuses one rather than resolving something it cannot name. The tag belongs to the last path element, since a colon before that one is a registry's port.
 
-**Check out with `fetch-depth: 0`.** The decision is a diff against the base commit, and a shallow checkout cannot reach it. The action then falls back to the published image, so a shallow clone doesn't fail. It just stops testing candidates.
+**Check out with `fetch-depth: 0`.** The decision is a diff against the base commit, and a shallow checkout leaves that commit out of the clone. The action treats a missing base as one that rules nothing out, and it builds a candidate on every run. A shallow clone still passes, at the price of that rebuild each time.
 
-**Log in before the pull.** A job that skips the rebuild pulls the published image instead, and pulling anonymously counts against a rate limit shared with every runner on the same address. Private repositories refuse it outright. Put `docker/login-action` before this step. The pull happens inside it, and a pull that fails does not stop the job: the image gets built from the checkout instead, under a warning that says so. That is what makes a first publish work, and it means a missing login costs you a rebuild rather than a red run.
+**Log in before the pull.** A job that skips the rebuild pulls the published image instead, and pulling anonymously counts against a rate limit shared with every runner on the same address. Private repositories refuse it outright. Put `docker/login-action` before this step. The pull happens inside it, and a pull that fails does not stop the job: the image gets built from the checkout instead, under a warning that says so. That is what makes a first publish work, and it means a missing login costs a rebuild rather than a red run.
 
-**Pass what the action cannot assume.** Where your build tool keeps its cache, and any device the suite needs, belong in `docker-args`:
+**Pass what the action cannot assume.** Where the build tool keeps its cache, and any device the suite needs, belong in `docker-args`:
 
 ```yaml
 - uses: h3nc4/dev-image-action@v2
@@ -72,7 +72,7 @@ The action diffs `base-sha` against `HEAD`, limited to `image-inputs`.
 
 ## Caching between jobs
 
-Building the candidate once per job is the price of every job resolving its own image. `cache-from` and `cache-to` with `type=gha` shift most of that cost to the Actions cache. Caching stays off unless you ask for it, because an image squashed into one layer gains little from a cache entry and can crowd everything else out of a small budget.
+Building the candidate once per job is the price of every job resolving its own image. `cache-from` and `cache-to` with `type=gha` shift most of that cost to the Actions cache. Caching stays off unless asked for, because an image squashed into one layer gains little from a cache entry and can crowd everything else out of a small budget.
 
 ## Tests
 
