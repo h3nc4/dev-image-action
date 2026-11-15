@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026 Henrique Almeida <me@h3nc4.com>
+
+name: Delete shared dev container image
+description: >
+  Deletes the artifact h3nc4/dev-image-action/share uploaded once every job that loads it has
+  finished. Needs actions: write. A refusal, as on a pull request from a fork, is a warning,
+  and the artifact then expires after its one-day retention.
+author: Henrique Almeida
+
+branding:
+  icon: trash-2
+  color: blue
+
+inputs:
+  artifact:
+    description: The share job's artifact output. Empty, there is nothing to delete.
+    required: false
+    default: ""
+  token:
+    description: Token the REST API is called with. It needs actions write on this repository.
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: "${{ github.action_path }}/../cleanup.sh"
+      env:
+        ARTIFACT: ${{ inputs.artifact }}
+        TOKEN: ${{ inputs.token }}

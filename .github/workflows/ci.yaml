@@ -23,7 +23,7 @@ jobs:
       - name: Run actions/checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Lint shell scripts
-        run: shellcheck -o all resolve.sh tests/*.sh
+        run: shellcheck -o all resolve.sh share.sh load.sh cleanup.sh tests/*.sh
 
   test:
     name: Test resolve.sh
@@ -83,3 +83,95 @@ jobs:
           docker image inspect busybox:candidate >/dev/null
       - name: The built image runs at the configured workdir
         run: test "$($DEV_RUN -c 'grep -c busybox:musl /src/tests/fixture/devcontainer.json')" = "1"
+
+  share:
+    name: Share a built candidate
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.dev.outputs.image }}
+      artifact: ${{ steps.dev.outputs.artifact }}
+    steps:
+      - name: Run actions/checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Share, with a base that cannot be reached
+        id: dev
+        uses: ./share
+        with:
+          devcontainer-file: tests/fixture/devcontainer.json
+          dockerfile: tests/fixture/Dockerfile
+          image-inputs: tests/fixture/Dockerfile
+          base-sha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+          artifact: fixture-image
+      - name: It hands on the published name and runs here in the candidate
+        run: |
+          test "${{ steps.dev.outputs.image }}" = "busybox:musl"
+          test "${{ steps.dev.outputs.artifact }}" = "fixture-image"
+          test "${DEV_IMAGE}" = "busybox:candidate"
+          test "$($DEV_RUN -c 'cat /etc/dev-image-candidate')" = "candidate"
+
+  share-nothing:
+    name: Share nothing when nothing was built
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run actions/checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Share, with nothing to compare against
+        id: dev
+        uses: ./share
+        with:
+          devcontainer-file: tests/fixture/devcontainer.json
+          dockerfile: tests/fixture/Dockerfile
+          image-inputs: tests/fixture/Dockerfile
+          base-sha: "0000000000000000000000000000000000000000"
+          artifact: fixture-image-unused
+      - name: It names the pin and uploads nothing
+        run: |
+          test "${{ steps.dev.outputs.image }}" = "busybox:musl"
+          test -z "${{ steps.dev.outputs.artifact }}"
+          test "${DEV_IMAGE}" = "busybox:musl"
+
+  use-shared:
+    name: Use the shared candidate
+    needs: [share]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run actions/checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Resolve, from the artifact
+        id: dev
+        uses: ./
+        with:
+          image: ${{ needs.share.outputs.image }}
+          artifact: ${{ needs.share.outputs.artifact }}
+          dockerfile: tests/fixture/Dockerfile
+          image-inputs: tests/fixture/Dockerfile
+          base-sha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+      - name: It runs in the candidate without building one
+        run: |
+          test "${{ steps.dev.outputs.image }}" = "busybox:musl"
+          test "$($DEV_RUN -c 'cat /etc/dev-image-candidate')" = "candidate"
+          if docker image inspect busybox:candidate >/dev/null 2>&1; then exit 1; fi
+
+  cleanup:
+    name: Delete the shared candidate
+    needs: [share, use-shared]
+    if: always() && needs.share.outputs.artifact != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Run actions/checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Delete the artifact
+        uses: ./cleanup
+        with:
+          artifact: ${{ needs.share.outputs.artifact }}
+      - name: It is gone from the run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT: ${{ needs.share.outputs.artifact }}
+        run: |
+          left="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts" \
+            --jq "[.artifacts[] | select(.name == \"${ARTIFACT}\")] | length")"
+          test "${left}" = "0"

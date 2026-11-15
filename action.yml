@@ -57,6 +57,14 @@ inputs:
     description: Passed straight to buildx --cache-to, for example type=gha,mode=max.
     required: false
     default: ""
+  artifact:
+    description: >
+      Artifact a share job uploaded, its artifact output. When set, the image is downloaded and
+      loaded before anything else, and the image inputs are not compared, so the job runs in the
+      candidate that job built without building or pulling it. Empty, the default, resolves the
+      image the usual way, which is also what a share job that built nothing asks for.
+    required: false
+    default: ""
   docker-args:
     description: >
       Extra flags for the exported invocation, appended after the defaults so they win:
@@ -74,6 +82,18 @@ outputs:
 runs:
   using: composite
   steps:
+    - if: inputs.artifact != ''
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+      with:
+        name: ${{ inputs.artifact }}
+        path: ${{ runner.temp }}/dev-image-load
+      env:
+        GITHUB_SERVER_URL: https://github.com
+    - if: inputs.artifact != ''
+      shell: sh
+      run: "${{ github.action_path }}/load.sh"
+      env:
+        ARCHIVE_DIR: ${{ runner.temp }}/dev-image-load
     # Only a cache needs buildx: the default builder cannot export one.
     - if: inputs.cache-from != '' || inputs.cache-to != ''
       uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
@@ -90,3 +110,4 @@ runs:
         CACHE_FROM: ${{ inputs.cache-from }}
         CACHE_TO: ${{ inputs.cache-to }}
         DOCKER_ARGS: ${{ inputs.docker-args }}
+        SHARED: ${{ inputs.artifact }}
