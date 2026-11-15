@@ -207,6 +207,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ARTIFACT: ${{ needs.share.outputs.artifact }}
         run: |
-          left="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts" \
-            --jq "[.artifacts[] | select(.name == \"${ARTIFACT}\")] | length")"
-          test "${left}" = "0"
+          for _ in $(seq 1 10); do
+            left="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts" \
+              --jq "[.artifacts[] | select(.name == \"${ARTIFACT}\")] | length")"
+            if [ "${left}" = "0" ]; then exit 0; fi
+            sleep 3
+          done
+          echo "::error::${ARTIFACT} is still listed 30 seconds after the delete"
+          exit 1
