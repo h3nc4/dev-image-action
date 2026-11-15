@@ -130,6 +130,41 @@ jobs:
           test -z "${{ steps.dev.outputs.artifact }}"
           test "${DEV_IMAGE}" = "busybox:musl"
 
+  share-without-upload:
+    name: Share through a transfer of the caller's own
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run actions/checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Share, without uploading
+        id: dev
+        uses: ./share
+        with:
+          devcontainer-file: tests/fixture/devcontainer.json
+          dockerfile: tests/fixture/Dockerfile
+          image-inputs: tests/fixture/Dockerfile
+          base-sha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+          artifact: fixture-image-unuploaded
+          upload: "false"
+      - name: It leaves the archive for the caller
+        id: archive
+        run: |
+          test "${{ steps.dev.outputs.artifact }}" = "fixture-image-unuploaded"
+          test -s "${{ steps.dev.outputs.path }}"
+          echo "dir=$(dirname "${{ steps.dev.outputs.path }}")" >>"${GITHUB_OUTPUT}"
+      - name: Resolve, from the directory
+        id: use
+        uses: ./
+        with:
+          image: ${{ steps.dev.outputs.image }}
+          artifact: ${{ steps.dev.outputs.artifact }}
+          artifact-path: ${{ steps.archive.outputs.dir }}
+      - name: It runs in the loaded candidate
+        run: |
+          test "${{ steps.use.outputs.image }}" = "busybox:musl"
+          test "$($DEV_RUN -c 'cat /etc/dev-image-candidate')" = "candidate"
+          test ! -e "${{ steps.dev.outputs.path }}"
+
   use-shared:
     name: Use the shared candidate
     needs: [share]

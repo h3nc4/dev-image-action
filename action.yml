@@ -65,6 +65,13 @@ inputs:
       image the usual way, which is also what a share job that built nothing asks for.
     required: false
     default: ""
+  artifact-path:
+    description: >
+      Directory a step of the caller's own downloaded the artifact into, for a forge where
+      actions/download-artifact refuses to run, such as Forgejo. Empty, the default, downloads
+      it here. Either way the archive is deleted once loaded.
+    required: false
+    default: ""
   docker-args:
     description: >
       Extra flags for the exported invocation, appended after the defaults so they win:
@@ -82,18 +89,16 @@ outputs:
 runs:
   using: composite
   steps:
-    - if: inputs.artifact != ''
+    - if: inputs.artifact != '' && inputs.artifact-path == ''
       uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
       with:
         name: ${{ inputs.artifact }}
         path: ${{ runner.temp }}/dev-image-load
-      env:
-        GITHUB_SERVER_URL: https://github.com
     - if: inputs.artifact != ''
       shell: sh
       run: "${{ github.action_path }}/load.sh"
       env:
-        ARCHIVE_DIR: ${{ runner.temp }}/dev-image-load
+        ARCHIVE_DIR: ${{ inputs.artifact-path || format('{0}/dev-image-load', runner.temp) }}
     # Only a cache needs buildx: the default builder cannot export one.
     - if: inputs.cache-from != '' || inputs.cache-to != ''
       uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
