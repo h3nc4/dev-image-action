@@ -1,0 +1,130 @@
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026 Henrique Almeida <me@h3nc4.com>
+
+name: Share dev container image
+description: >
+  Resolves the dev container image once for a whole run. When the change touches the image
+  inputs, the candidate built from the checkout is uploaded as an artifact under the published
+  name, for the other jobs to load with h3nc4/dev-image-action instead of building it again.
+author: Henrique Almeida
+
+branding:
+  icon: share-2
+  color: blue
+
+inputs:
+  devcontainer-file:
+    description: >
+      Dev container definition the published image is read from, tag and all. The file the
+      editor already obeys is the only source of truth for the image, so a release bumping the
+      pin moves CI with it and no second copy of the name or the version can fall behind.
+    required: false
+    default: .devcontainer.json
+  image:
+    description: >
+      Published image, with its tag, overriding the dev container file. For a job whose image
+      is not the one the dev container pins, and for a project that has no such file.
+    required: false
+    default: ""
+  dockerfile:
+    description: Dockerfile to build when the image inputs changed.
+    required: false
+    default: docker/dev.Dockerfile
+  image-inputs:
+    description: >
+      Space-separated paths that decide a rebuild. A change to any of them under the compared
+      range builds the image from this checkout instead of pulling the published one, so the
+      job exercises the candidate. Keep the Dockerfile and everything it copies in here.
+    required: false
+    default: docker/dev.Dockerfile scripts/entrypoint.sh scripts/switch-user.sh
+  workdir:
+    description: Where the checkout is mounted inside the container.
+    required: false
+    default: /workspace
+  base-sha:
+    description: >
+      Commit the checkout is compared against. The default covers pull requests and pushes;
+      an event carrying neither, such as workflow_dispatch, resolves to the published image.
+    required: false
+    default: ${{ github.event.pull_request.base.sha || github.event.before }}
+  cache-from:
+    description: >
+      Passed straight to buildx --cache-from, for example type=gha. Empty, the default,
+      builds without a cache: worth keeping for an image that squashes to one large layer,
+      where the entry would crowd out everything else in a small cache budget.
+    required: false
+    default: ""
+  cache-to:
+    description: Passed straight to buildx --cache-to, for example type=gha,mode=max.
+    required: false
+    default: ""
+  docker-args:
+    description: >
+      Extra flags for the exported invocation, appended after the defaults so they win:
+      a later -w or --user overrides the earlier one, and mounts simply add. This is how a
+      caller supplies what the action has no business assuming, such as where a build tool
+      keeps its cache, or --device /dev/kvm for an emulator.
+    required: false
+    default: ""
+  artifact:
+    description: >
+      Name the saved candidate is uploaded under. Give each share step in a workflow its own,
+      since every job of the run sees every artifact.
+    required: false
+    default: dev-image
+  upload:
+    description: >
+      false saves the candidate without uploading it, for a forge where actions/upload-artifact
+      refuses to run, such as Forgejo. The caller then uploads the path output under the
+      artifact output with a step of its own.
+    required: false
+    default: "true"
+
+outputs:
+  image:
+    description: >
+      Image the other jobs pass as their image input. It is the published name, which a job
+      that loads the artifact finds already present and one that does not pulls.
+    value: ${{ steps.resolve.outputs.published }}
+  artifact:
+    description: Artifact the other jobs pass as their artifact input, empty when nothing was built.
+    value: ${{ steps.save.outputs.artifact }}
+  path:
+    description: Archive the candidate was saved to, empty when nothing was built.
+    value: ${{ steps.save.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - if: inputs.cache-from != '' || inputs.cache-to != ''
+      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+    - id: resolve
+      shell: sh
+      run: "${{ github.action_path }}/../resolve.sh"
+      env:
+        DEVCONTAINER_FILE: ${{ inputs.devcontainer-file }}
+        IMAGE: ${{ inputs.image }}
+        DOCKERFILE: ${{ inputs.dockerfile }}
+        IMAGE_INPUTS: ${{ inputs.image-inputs }}
+        WORKDIR: ${{ inputs.workdir }}
+        BASE_SHA: ${{ inputs.base-sha }}
+        CACHE_FROM: ${{ inputs.cache-from }}
+        CACHE_TO: ${{ inputs.cache-to }}
+        DOCKER_ARGS: ${{ inputs.docker-args }}
+    - id: save
+      if: steps.resolve.outputs.built == 'true'
+      shell: sh
+      run: "${{ github.action_path }}/../share.sh"
+      env:
+        CANDIDATE: ${{ steps.resolve.outputs.image }}
+        PUBLISHED: ${{ steps.resolve.outputs.published }}
+        ARTIFACT: ${{ inputs.artifact }}
+    - if: steps.resolve.outputs.built == 'true' && inputs.upload != 'false'
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+      with:
+        name: ${{ inputs.artifact }}
+        path: ${{ steps.save.outputs.path }}
+        if-no-files-found: error
+        retention-days: 1
+        compression-level: 0
+        overwrite: true

@@ -8,7 +8,7 @@ A project with a dev container usually pins it, so CI pulls a published tag. Tha
 - uses: actions/checkout@v7
   with:
     fetch-depth: 0
-- uses: h3nc4/dev-image-action@v2
+- uses: h3nc4/dev-image-action@v3
 - run: $DEV_RUN -c 'gradle --no-daemon test'
 ```
 
@@ -22,7 +22,59 @@ So a release workflow bumps `.devcontainer.json` and nothing else, and every job
 
 ## Why not a container job
 
-`container:` pulls the image before the first step runs, so a job cannot build the image it needs. The image also lives only in this runner's Docker daemon, so it cannot cross to another job. Every job resolves it for itself, so this is an action rather than a reusable workflow.
+`container:` pulls the image before the first step runs, so a job cannot build the image it needs. The image also lives only in this runner's Docker daemon, so it reaches another job only as an artifact, which is what `share` uploads. Each job still resolves its image with a step of its own, so this is an action rather than a reusable workflow.
+
+## Building once per run
+
+A workflow with several jobs in the dev image would build a candidate in every one of them. With these entry points one job builds it and the rest load it.
+
+| Entry point | Job | What it does |
+| --- | --- | --- |
+| `h3nc4/dev-image-action/share` | one, first | Resolves the image as usual. When it built a candidate, saves it under the published name, compressed with zstd or else gzip, and uploads that as an artifact kept for one day. |
+| `h3nc4/dev-image-action` | every other | Given `artifact`, downloads and loads that image before resolving, then finds the pin already present and runs in it as it is. |
+| `h3nc4/dev-image-action/cleanup` | last | Deletes the artifact once every job is done with it. |
+
+```yaml
+jobs:
+  dev-image:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.dev.outputs.image }}
+      artifact: ${{ steps.dev.outputs.artifact }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: dev
+        uses: h3nc4/dev-image-action/share@v3
+
+  test:
+    needs: [dev-image]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: h3nc4/dev-image-action@v3
+        with:
+          image: ${{ needs.dev-image.outputs.image }}
+          artifact: ${{ needs.dev-image.outputs.artifact }}
+          base-sha: ""
+      - run: $DEV_RUN -c 'make test'
+
+  dev-image-cleanup:
+    needs: [dev-image, test]
+    if: always() && needs.dev-image.outputs.artifact != ''
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - uses: h3nc4/dev-image-action/cleanup@v3
+        with:
+          artifact: ${{ needs.dev-image.outputs.artifact }}
+```
+
+When `share` built nothing, its `artifact` output is empty and it doesn't upload. Every job then pulls the published image as it would without `share`. The other jobs pass an empty `base-sha` because the `share` job already compared the change. A shallow checkout and the default `image-inputs` are then enough for them, and a missing base commit cannot start a build of their own. Give `share` the inputs one job would take, such as `image`, `dockerfile` and `image-inputs`. The `share` job runs in the candidate too, through the same `DEV_RUN`, and can do work of its own.
+
+`cleanup` needs `actions: write` and calls the REST API with `github.token`. A pull request from a fork gets a read-only token, so the delete is refused there with a warning, and the one-day retention removes the artifact instead. List every consuming job under its `needs`, or the delete can land before a job has loaded the image.
 
 ## Inputs
 
@@ -37,10 +89,29 @@ So a release workflow bumps `.devcontainer.json` and nothing else, and every job
 | `cache-from` | empty | Passed to `buildx --cache-from`, such as `type=gha`. |
 | `cache-to` | empty | Passed to `buildx --cache-to`, such as `type=gha,mode=max`. |
 | `docker-args` | empty | Extra flags for the exported invocation, appended so they win. |
+| `artifact` | empty | Artifact from a `share` job to load before resolving. The image inputs are then not compared. |
+| `artifact-path` | empty | Directory a step of the caller's own downloaded that artifact into, for a forge where `actions/download-artifact` refuses to run. |
+
+`share` takes the same inputs apart from those two, plus these:
+
+| Input | Default | Meaning |
+| --- | --- | --- |
+| `artifact` | `dev-image` | Artifact the candidate is uploaded as. Give each `share` in a workflow its own. |
+| `upload` | `true` | `false` saves the candidate and stops there. The caller then moves the archive itself. |
+
+`cleanup` takes `artifact`, the name to delete, and `token`, which defaults to `github.token`.
 
 ## Outputs and exports
 
 `image` is the output. `DEV_IMAGE` and `DEV_RUN` reach later steps through the environment.
+
+`share` exports the same two, which point at the candidate itself when it built one. Its outputs are what the other jobs pass on:
+
+| Output | Meaning |
+| --- | --- |
+| `image` | The published name, which a job that loads the artifact finds already present. |
+| `artifact` | Name of the uploaded artifact, empty when nothing was built. |
+| `path` | Archive the candidate was saved to, empty when nothing was built. |
 
 ## Requirements
 
@@ -64,19 +135,60 @@ Later flags override earlier ones, so `docker-args` can replace a default such a
 
 The action diffs `base-sha` against `HEAD`, limited to `image-inputs`.
 
-* Nothing listed changed, so the job runs in the image the dev container file pins.
+* Nothing listed changed, so the job runs in the image the dev container file pins. An image of that name already in the daemon is used as it is, since a tag that `docker load` brought in exists in no registry. Otherwise it is pulled.
+* An `artifact` was given, and `share` already decided. The comparison is skipped, and the loaded image counts as present.
 * A listed path moved, so the job runs in a locally built `<image name>:candidate`. That name has no namespace, which keeps anything from trying to pull it.
 * The base is absent or all zeroes, which is what a branch's first push reports. There is nothing to compare, so the published image stands.
 * The base no longer resolves, which is what a force-push leaves behind. Nothing can be ruled out, so it builds.
 * The published image cannot be pulled, so it builds and warns. A project that has never published its first image starts here, without a bootstrap step of its own.
 
-## Caching between jobs
+## Caching between runs
 
-Building the candidate once per job is the price of every job resolving its own image. `cache-from` and `cache-to` with `type=gha` shift most of that cost to the Actions cache. Caching stays off unless asked for, because an image squashed into one layer gains little from a cache entry and can crowd everything else out of a small budget.
+`share` removes the rebuild in every job of one run. `cache-from` and `cache-to` with `type=gha` also shorten the one build that remains, by reusing layers from earlier runs. Caching stays off unless asked for, because an image squashed into one layer gains little from a cache entry and can crowd everything else out of a small budget.
+
+## Forgejo
+
+Resolving runs on Forgejo unchanged. The artifact hand-off needs the following there, measured on Forgejo 17.0.1.
+
+**Upload and download with Forgejo's fork.** `actions/upload-artifact` and `actions/download-artifact` from v4 on refuse every server other than github.com with `GHESNotSupportedError`. Forgejo serves the same artifact protocol, and `https://data.forgejo.org/forgejo/upload-artifact@v4` and its download twin talk to it. So pass `upload: "false"` to `share` and upload its `path` output yourself, then download in each consumer and point `artifact-path` at the directory:
+
+```yaml
+- id: dev
+  uses: h3nc4/dev-image-action/share@v3
+  with:
+    upload: "false"
+- if: steps.dev.outputs.artifact != ''
+  uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+  with:
+    name: ${{ steps.dev.outputs.artifact }}
+    path: ${{ steps.dev.outputs.path }}
+    retention-days: 1
+    compression-level: 0
+```
+
+```yaml
+- if: needs.dev-image.outputs.artifact != ''
+  uses: https://data.forgejo.org/forgejo/download-artifact@v4
+  with:
+    name: ${{ needs.dev-image.outputs.artifact }}
+    path: ${{ runner.temp }}/dev-image
+- uses: h3nc4/dev-image-action@v3
+  with:
+    image: ${{ needs.dev-image.outputs.image }}
+    artifact: ${{ needs.dev-image.outputs.artifact }}
+    artifact-path: ${{ runner.temp }}/dev-image
+    base-sha: ""
+```
+
+**Keep the results URL open to the runner.** The fork uploads to `ACTIONS_RESULTS_URL`, which Forgejo sets to its own public address. A proxy in front of that address that challenges or blocks the runner fails the upload with its own HTML page.
+
+**Have jq or node in the job image for `cleanup`.** Forgejo answers the same REST endpoints, under `/api/v1`, with a bare array where GitHub wraps the list in an object, and `cleanup` reads both through whichever of the two it finds. The job container needs `curl` as well. `cleanup` warns rather than failing when the API refuses, so a token without the right to delete leaves the artifact to its retention.
+
+A runner whose jobs share one Docker daemon keeps the published tag a consumer loaded. A later job on that daemon with the same pin then uses it without a pull, which is the rule above working as written, and also the reason `share` puts back whatever tag it borrowed.
 
 ## Tests
 
-`./tests/resolve.test.sh` builds a throwaway repository and walks every decision above. It also covers what the action refuses, which is a dev container file that is absent, one without an image key, and a reference without a tag. It then proves the exported invocation runs a command in the image, with the checkout mounted and any extra flags forwarded. It needs docker and git, and it runs anywhere rather than only on a runner. CI runs it alongside two jobs that use the action for real, one on each side of the decision.
+`./tests/resolve.test.sh` builds a throwaway repository and walks every decision above. It also covers what the action refuses, which is a dev container file that is absent, one without an image key, and a reference without a tag. It hands a candidate from `share.sh` to `load.sh` through a real archive, and runs `cleanup.sh` against a stand-in for curl serving both forges' listings. It then proves the exported invocation runs a command in the image, with the checkout mounted and any extra flags forwarded. It needs docker and git, plus jq or node for the cleanup cases, and it runs anywhere rather than only on a runner. CI runs it alongside jobs that use the actions for real. Two of them sit on either side of the decision. In the others `share` uploads a candidate, a consumer loads it, and `cleanup` deletes it and checks that the artifact is gone.
 
 ## License
 

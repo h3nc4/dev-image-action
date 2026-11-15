@@ -8,8 +8,8 @@
 # image stays in this runner's daemon, which is why callers reach it through docker run
 # rather than a container job, and why every job resolves this for itself.
 #
-# Called by the action beside it, which documents every variable read here. Writes image to
-# GITHUB_OUTPUT, and DEV_IMAGE and DEV_RUN to GITHUB_ENV.
+# Called by the actions in this repository, which document every variable read here. Writes
+# image, published and built to GITHUB_OUTPUT, and DEV_IMAGE and DEV_RUN to GITHUB_ENV.
 
 set -eu
 
@@ -57,6 +57,13 @@ case "${published##*/}" in
 esac
 published_repo="${published%:*}"
 
+# An image loaded from a share job was already decided there, so diffing again could only
+# rebuild what that job built.
+if [ -n "${SHARED:-}" ]; then
+  echo "Image shared through the ${SHARED} artifact, so the image inputs are not compared" >&2
+  BASE_SHA=""
+fi
+
 # A first push to a branch reports an all-zero base and has nothing to compare against, so
 # treat the image as untouched. A base that no longer resolves, after a force-push, is the
 # opposite case: nothing can be ruled out, so build.
@@ -76,7 +83,19 @@ case "${BASE_SHA:-}" in
 esac
 
 image=""
+built="false"
 if [ -z "${changed}" ]; then
+  # A tag already in the daemon came from an earlier pull or a docker load. One loaded from a
+  # share job exists in no registry, so pulling it would fail.
+  if docker image inspect "${published}" >/dev/null 2>&1; then
+    image="${published}"
+    echo "Image inputs untouched and ${image} is already present, so using it without a pull" >&2
+  elif [ -n "${SHARED:-}" ]; then
+    echo "::warning::The ${SHARED} artifact did not hold ${published}, so it is being pulled." \
+      "Pass the share job's image output as the image input."
+  fi
+fi
+if [ -z "${changed}" ] && [ -z "${image}" ]; then
   if docker pull -q "${published}" >/dev/null 2>&1; then
     image="${published}"
     echo "Image inputs untouched, so using ${image}" >&2
@@ -99,6 +118,7 @@ if [ -z "${image}" ]; then
     if [ -n "${CACHE_TO:-}" ]; then set -- "$@" --cache-to "${CACHE_TO}"; fi
   fi
   docker "$@" -f "${dockerfile}" -t "${image}" .
+  built="true"
 fi
 
 uid="$(id -u)"
@@ -131,7 +151,11 @@ runner="${RUNNER_TEMP:-/tmp}/dev-run"
 } >"${runner}"
 chmod +x "${runner}"
 
-echo "image=${image}" >>"${GITHUB_OUTPUT}"
+{
+  echo "image=${image}"
+  echo "published=${published}"
+  echo "built=${built}"
+} >>"${GITHUB_OUTPUT}"
 {
   echo "DEV_IMAGE=${image}"
   echo "DEV_RUN=${runner}"
