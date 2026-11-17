@@ -72,7 +72,7 @@ jobs:
           artifact: ${{ needs.dev-image.outputs.artifact }}
 ```
 
-When `share` built nothing, its `artifact` output is empty and it doesn't upload. Every job then pulls the published image as it would without `share`. The other jobs pass an empty `base-sha` because the `share` job already compared the change. A shallow checkout and the default `image-inputs` are then enough for them, and a missing base commit cannot start a build of their own. Give `share` the inputs one job would take, such as `image`, `dockerfile` and `image-inputs`. The `share` job runs in the candidate too, through the same `DEV_RUN`, and can do work of its own.
+When `share` built nothing, its `artifact` output is empty and it doesn't upload. Every job then pulls the published image as it would without `share`, while `share` itself only looks the tag up in the registry and never pulls it. The other jobs pass an empty `base-sha` because the `share` job already compared the change. A shallow checkout and the default `image-inputs` are then enough for them, and a missing base commit cannot start a build of their own. Give `share` the inputs one job would take, such as `image`, `dockerfile` and `image-inputs`. The `share` job runs in the candidate too, through the same `DEV_RUN`, and can do work of its own. When it left the published image unpulled, its first `DEV_RUN` command pulls it.
 
 `cleanup` needs `actions: write` and calls the REST API with `github.token`. A pull request from a fork gets a read-only token, so the delete is refused there with a warning, and the one-day retention removes the artifact instead. List every consuming job under its `needs`, or the delete can land before a job has loaded the image.
 
@@ -136,6 +136,7 @@ Later flags override earlier ones, so `docker-args` can replace a default such a
 The action diffs `base-sha` against `HEAD`, limited to `image-inputs`.
 
 * Nothing listed changed, so the job runs in the image the dev container file pins. An image of that name already in the daemon is used as it is, since a tag that `docker load` brought in exists in no registry. Otherwise it is pulled.
+* In a `share` job with every listed path untouched, `docker buildx imagetools inspect`, or else `docker manifest inspect`, finds the tag in the registry. The pull is left to the jobs that run the image, and a lookup that fails falls back to it.
 * An `artifact` was given, and `share` already decided. The comparison is skipped, and the loaded image counts as present.
 * A listed path moved, so the job runs in a locally built `<image name>:candidate`. That name has no namespace, which keeps anything from trying to pull it.
 * The base is absent or all zeroes, which is what a branch's first push reports. There is nothing to compare, so the published image stands.
@@ -188,7 +189,7 @@ A runner whose jobs share one Docker daemon keeps the published tag a consumer l
 
 ## Tests
 
-`./tests/resolve.test.sh` builds a throwaway repository and walks every decision above. It also covers what the action refuses, which is a dev container file that is absent, one without an image key, and a reference without a tag. It hands a candidate from `share.sh` to `load.sh` through a real archive, and runs `cleanup.sh` against a stand-in for curl serving both forges' listings. It then proves the exported invocation runs a command in the image, with the checkout mounted and any extra flags forwarded. It needs docker and git, plus jq or node for the cleanup cases, and it runs anywhere rather than only on a runner. CI runs it alongside jobs that use the actions for real. Two of them sit on either side of the decision. In the others `share` uploads a candidate, a consumer loads it, and `cleanup` deletes it and checks that the artifact is gone.
+`./tests/resolve.test.sh` builds a throwaway repository and walks every decision above. It also covers what the action refuses, which is a dev container file that is absent, one without an image key, and a reference without a tag. It hands a candidate from `share.sh` to `load.sh` through a real archive, and runs `cleanup.sh` against a stand-in for curl serving both forges' listings. A stand-in for docker records every call, and the suite asserts that a `share` job finds a published pin in the registry and doesn't pull it. It then proves the exported invocation runs a command in the image, with the checkout mounted and any extra flags forwarded. It needs docker and git, plus jq or node for the cleanup cases, and it runs anywhere rather than only on a runner. CI runs it alongside jobs that use the actions for real. Two of them sit on either side of the decision. In the others `share` uploads a candidate, a consumer loads it, and `cleanup` deletes it and checks that the artifact is gone.
 
 ## License
 

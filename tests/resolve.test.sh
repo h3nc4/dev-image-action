@@ -131,6 +131,61 @@ check "a locally present image is used without a pull" "${local_only}" \
 check "a pulled image is not reported as built" "false" \
   output built
 
+echo "Naming a published pin without pulling it"
+# A stand-in for docker logs every call and forwards it, except that FAKE_ABSENT reads as missing
+# from the daemon and FAKE_UNLISTED makes every manifest lookup fail.
+real_docker="$(command -v docker)"
+mkdir -p "${work}/docker-bin"
+cat >"${work}/docker-bin/docker" <<FAKE
+#!/bin/sh
+echo "\$*" >>"\${DOCKER_LOG}"
+for last in "\$@"; do :; done
+case "\$1 \$2" in
+  "image inspect") [ "\${last}" != "\${FAKE_ABSENT:-}" ] || exit 1 ;;
+  "buildx imagetools" | "manifest inspect") [ -z "\${FAKE_UNLISTED:-}" ] || exit 1 ;;
+  *) ;;
+esac
+exec "${real_docker}" "\$@"
+FAKE
+chmod +x "${work}/docker-bin/docker"
+spied() { # $1=BASE_SHA, rest: VAR=value overrides. Resolves through the stand-in
+  : >"${work}/docker.log"
+  sha="$1"
+  shift
+  resolved "${sha}" PATH="${work}/docker-bin:${PATH}" DOCKER_LOG="${work}/docker.log" "$@"
+}
+pulls() { grep -c '^pull ' "${work}/docker.log" || :; }
+starts() { grep -c '^run ' "${work}/docker.log" || :; }
+lookups() { grep -cE '^(buildx imagetools|manifest) inspect ' "${work}/docker.log" || :; }
+
+check "a share job names a published pin" "${published}:${tag}" \
+  spied "${base}" PULL=false FAKE_ABSENT="${published}:${tag}"
+check "without pulling it" "0" \
+  pulls
+check "or starting a container from it" "0" \
+  starts
+check "and it is not reported as built" "false" \
+  output built
+run="$(exported DEV_RUN)"
+check "its invocation still runs a command in the image" "hello" \
+  sh "${run}" -c 'echo hello'
+# $0 is the shell the container started, which the invocation picks on its first run.
+# shellcheck disable=SC2016
+check "and picks /bin/sh for an image without bash" "/bin/sh" \
+  sh "${run}" -c 'echo "$0"'
+check "a failed manifest lookup falls back to a pull" "${published}:${tag}" \
+  spied "${base}" PULL=false FAKE_ABSENT="${published}:${tag}" FAKE_UNLISTED=1
+check "which it then makes" "1" \
+  pulls
+check "a job that runs the image resolves the same pin" "${published}:${tag}" \
+  spied "${base}" FAKE_ABSENT="${published}:${tag}"
+check "by pulling it" "1" \
+  pulls
+check "a share job with the pin already present uses it" "${published}:${tag}" \
+  spied "${base}" PULL=false
+check "without a lookup" "0" \
+  lookups
+
 echo "Reading the pin"
 pin alt.json "${published}:glibc"
 check "an alternative dev container file is read" "${published}:glibc" \
@@ -181,6 +236,8 @@ echo "Bootstrapping, and recovering from a tag that is not there"
 head_sha="$(git rev-parse HEAD)"
 check "an unpullable published image builds instead" "nonexistent-dev-xyz:candidate" \
   resolved "${head_sha}" IMAGE=h3nc4/nonexistent-dev-xyz:1
+check "a share job builds an unpublished pin too" "nonexistent-dev-xyz:candidate" \
+  resolved "${head_sha}" IMAGE=h3nc4/nonexistent-dev-xyz:1 PULL=false
 
 check "a shared artifact missing the image falls back to the usual way" \
   "nonexistent-dev-xyz:candidate" \
