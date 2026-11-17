@@ -129,6 +129,10 @@ jobs:
           test "${{ steps.dev.outputs.image }}" = "busybox:musl"
           test -z "${{ steps.dev.outputs.artifact }}"
           test "${DEV_IMAGE}" = "busybox:musl"
+      - name: It left the pin unpulled, and the invocation pulls it on first use
+        run: |
+          if docker image inspect busybox:musl >/dev/null 2>&1; then exit 1; fi
+          test "$($DEV_RUN -c 'grep -c busybox:musl /workspace/tests/fixture/devcontainer.json')" = "1"
 
   share-without-upload:
     name: Share through a transfer of the caller's own

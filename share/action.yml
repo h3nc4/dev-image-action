@@ -111,6 +111,7 @@ runs:
         CACHE_FROM: ${{ inputs.cache-from }}
         CACHE_TO: ${{ inputs.cache-to }}
         DOCKER_ARGS: ${{ inputs.docker-args }}
+        PULL: "false"
     - id: save
       if: steps.resolve.outputs.built == 'true'
       shell: sh
